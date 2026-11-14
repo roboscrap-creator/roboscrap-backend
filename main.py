@@ -254,3 +254,73 @@ async def verificar_links(supabase_key: Optional[str] = None):
                     inativos += 1
 
     return {"ok": True, "links_desativados": inativos}
+
+
+class ExtrairSiteReq(BaseModel):
+    site_url: str
+
+
+@app.post("/extrair-site")
+async def extrair_site(req: ExtrairSiteReq):
+    url_alvo = req.site_url.strip()
+    if not url_alvo.startswith("http"):
+        url_alvo = "https://" + url_alvo
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Referer": url_alvo,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    padrao_stream = re.compile(
+        r'https?://[^\s"\'<>\\]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>\\]*)?',
+        re.IGNORECASE,
+    )
+    padrao_iframe = re.compile(
+        r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']',
+        re.IGNORECASE,
+    )
+
+    encontrados = []
+    vistos = set()
+
+    def extrair_de_html(texto_html: str, origem: str):
+        limpo = texto_html.replace("\\/", "/")
+        for m in padrao_stream.findall(limpo):
+            if m not in vistos:
+                vistos.add(m)
+                qual = "4K" if "2160" in m or "4k" in m.lower() else ("1080p" if "1080" in m else ("720p" if "720" in m else "HD"))
+                encontrados.append({
+                    "url_stream": m,
+                    "formato": "HLS (.m3u8)" if ".m3u8" in m.lower() else "MP4/MKV",
+                    "qualidade": qual,
+                    "origem": origem,
+                })
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+            res = await client.get(url_alvo, headers=headers)
+            html = res.text
+
+            m_titulo = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            titulo_pagina = re.sub(r"\s+", " ", m_titulo.group(1)).strip() if m_titulo else url_alvo
+
+            extrair_de_html(html, "pagina_principal")
+
+            if not encontrados:
+                iframes = padrao_iframe.findall(html)[:3]
+                for ifr in iframes:
+                    try:
+                        r_ifr = await client.get(ifr, headers={**headers, "Referer": url_alvo}, timeout=12.0)
+                        extrair_de_html(r_ifr.text, "iframe_player")
+                    except Exception:
+                        pass
+
+        return {
+            "ok": True,
+            "titulo_pagina": titulo_pagina,
+            "total": len(encontrados),
+            "streams": encontrados,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao ler site: {str(e)}")
