@@ -324,3 +324,174 @@ async def extrair_site(req: ExtrairSiteReq):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao ler site: {str(e)}")
+
+
+class LoteInteligenteReq(BaseModel):
+    fonte_url: str
+    limite: int = 100
+    filtro: str = ""
+    auto_aprovar: bool = True
+    supabase_url: str = ""
+    supabase_key: str = ""
+    tmdb_key: str = ""
+
+_status_lote = {"rodando": False, "mensagem": "Aguardando comando."}
+
+def _limpar_nome_stream(url_stream: str, titulo_bruto: str = ""):
+    lower = url_stream.lower()
+    is_serie = bool(re.search(r"(s\\d{1,2}e\\d{1,2}|/\\d{1,2}(leg|dub)/|temporada|season|episodio)", lower))
+    categoria = "Série" if is_serie else "Filme"
+    qual = "4K" if ("2160" in lower or "4k" in lower) else ("1080p" if "1080" in lower else ("720p" if "720" in lower else "1080p"))
+    audio = "Legendado" if ("leg" in lower and "dub" not in lower) else "Dublado"
+
+    titulo = titulo_bruto.strip()
+    if not titulo:
+        try:
+            path = url_stream.split("?")[0].rstrip("/")
+            segs = [s for s in path.split("/") if s]
+            if segs:
+                alvo = segs[-3] if (is_serie and len(segs) >= 3) else segs[-1]
+                alvo = re.sub(r"\\.(mp4|m3u8|mkv|avi)$", "", alvo, flags=re.I)
+                alvo = re.sub(r"[-_](dub|leg|dual|720p|1080p|4k|alto|baixo|hd|fhd).*$", "", alvo, flags=re.I)
+                alvo = re.sub(r"[-_.]", " ", alvo).strip()
+                if alvo:
+                    titulo = alvo[0].upper() + alvo[1:]
+        except Exception:
+            pass
+    return titulo or "Sem Título", categoria, qual, audio
+
+async def _processar_lote_bg(req: LoteInteligenteReq):
+    global _status_lote
+    sb_url = (req.supabase_url or os.getenv("SUPABASE_URL", "https://kuziampmbltqdqkqyrlb.supabase.co")).rstrip("/")
+    sb_key = req.supabase_key or os.getenv("SUPABASE_KEY", "")
+    tmdb_key = req.tmdb_key or os.getenv("TMDB_KEY", "")
+
+    if not sb_key:
+        _status_lote = {"rodando": False, "mensagem": "Erro: SUPABASE_KEY ausente."}
+        return
+
+    _status_lote = {"rodando": True, "mensagem": "Baixando fonte e sincronizando catálogo existente..."}
+    headers_sb = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}", "Content-Type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            r_exist = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=url_stream", headers=headers_sb)
+            urls_existentes = {item.get("url_stream", "").strip() for item in (r_exist.json() if r_exist.status_code == 200 else [])}
+
+            r_src = await client.get(req.fonte_url, headers={"User-Agent": "Mozilla/5.0"})
+            texto = r_src.text
+
+            itens_brutos = []
+            linhas = texto.splitlines()
+            ultimo_nome = ""
+            for linha in linhas:
+                l = linha.strip()
+                if l.startswith("#EXTINF"):
+                    ultimo_nome = l.split(",")[-1].strip()
+                elif l.startswith("http"):
+                    itens_brutos.append((l, ultimo_nome))
+                    ultimo_nome = ""
+
+            if not itens_brutos:
+                encontrados = re.findall(r"https?://[^\\s\\"\\x27<>]+\\.(?:m3u8|mp4|mkv)(?:\\?[^\\s\\"\\x27<>]*)?", texto, flags=re.I)
+                itens_brutos = [(u, "") for u in dict.fromkeys(encontrados)]
+
+            filtro_low = req.filtro.strip().lower()
+            candidatos = []
+            vistos = set()
+            for u, nome_m3u in itens_brutos:
+                u_clean = u.strip()
+                if u_clean in urls_existentes or u_clean in vistos:
+                    continue
+                if filtro_low and filtro_low not in u_clean.lower() and filtro_low not in nome_m3u.lower():
+                    continue
+                vistos.add(u_clean)
+                candidatos.append((u_clean, nome_m3u))
+
+            if req.limite > 0:
+                candidatos = candidatos[:req.limite]
+
+            total = len(candidatos)
+            if total == 0:
+                _status_lote = {"rodando": False, "mensagem": "Nenhum link inédito encontrado com esses filtros."}
+                return
+
+            cache_tmdb = {}
+            publicados = 0
+            curadoria = 0
+
+            for idx, (u, nome_m3u) in enumerate(candidatos, 1):
+                if idx % 10 == 0 or idx == 1:
+                    _status_lote = {"rodando": True, "mensagem": f"Processando {idx}/{total} (Publicados: {publicados} | Curadoria: {curadoria})..."}
+
+                titulo_limpo, categoria, qual, audio = _limpar_nome_stream(u, nome_m3u)
+                chave_cache = f"{categoria}:{titulo_limpo.lower()}"
+
+                meta = cache_tmdb.get(chave_cache)
+                if meta is None and tmdb_key and titulo_limpo != "Sem Título":
+                    try:
+                        r_tm = await client.get(
+                            "https://api.themoviedb.org/3/search/multi",
+                            params={"api_key": tmdb_key, "language": "pt-BR", "query": titulo_limpo},
+                            timeout=8.0,
+                        )
+                        if r_tm.status_code == 200:
+                            res_tm = r_tm.json().get("results") or []
+                            if res_tm:
+                                m = res_tm[0]
+                                data_str = str(m.get("release_date") or m.get("first_air_date") or "")
+                                meta = {
+                                    "titulo": m.get("title") or m.get("name") or titulo_limpo,
+                                    "capa": f"https://image.tmdb.org/t/p/w500{m['poster_path']}" if m.get("poster_path") else "",
+                                    "banner": f"https://image.tmdb.org/t/p/original{m['backdrop_path']}" if m.get("backdrop_path") else "",
+                                    "sinopse": m.get("overview") or "",
+                                    "ano": int(data_str[:4]) if len(data_str) >= 4 and data_str[:4].isdigit() else 2026,
+                                    "achou": bool(m.get("poster_path")),
+                                }
+                    except Exception:
+                        pass
+                    if meta is None:
+                        meta = {"titulo": titulo_limpo, "capa": "", "banner": "", "sinopse": "", "ano": 2026, "achou": False}
+                    cache_tmdb[chave_cache] = meta
+                elif meta is None:
+                    meta = {"titulo": titulo_limpo, "capa": "", "banner": "", "sinopse": "", "ano": 2026, "achou": False}
+
+                aprovado_auto = bool(req.auto_aprovar and meta["achou"])
+                payload = {
+                    "titulo": meta["titulo"],
+                    "categoria": categoria,
+                    "url_stream": u,
+                    "qualidade": qual,
+                    "audio": audio,
+                    "capa_url": meta["capa"],
+                    "banner_url": meta["banner"],
+                    "sinopse": meta["sinopse"],
+                    "genero": "Ação, Aventura",
+                    "ano": meta["ano"],
+                    "aprovado": aprovado_auto,
+                    "link_ativo": True,
+                }
+                r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=payload)
+                if r_ins.status_code in (200, 201):
+                    if aprovado_auto:
+                        publicados += 1
+                    else:
+                        curadoria += 1
+
+            _status_lote = {
+                "rodando": False,
+                "mensagem": f"Lote finalizado! {publicados} publicados direto (TMDB OK) e {curadoria} enviados para Curadoria."
+            }
+    except Exception as e:
+        _status_lote = {"rodando": False, "mensagem": f"Erro no lote: {e}"}
+
+@app.post("/importar-lote-inteligente")
+async def importar_lote_inteligente(req: LoteInteligenteReq, background_tasks: BackgroundTasks):
+    if _status_lote.get("rodando"):
+        return {"ok": False, "mensagem": "Já existe um lote rodando no servidor. Aguarde concluir."}
+    background_tasks.add_task(_processar_lote_bg, req)
+    return {"ok": True, "mensagem": "Importação inteligente iniciada no servidor Render!"}
+
+@app.get("/status-lote")
+async def status_lote():
+    return _status_lote
