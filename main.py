@@ -474,7 +474,6 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     "categoria": categoria,
                     "url_stream": u,
                     "qualidade": qual,
-                    "audio": audio,
                     "capa_url": meta["capa"],
                     "banner_url": meta["banner"],
                     "sinopse": meta["sinopse"],
