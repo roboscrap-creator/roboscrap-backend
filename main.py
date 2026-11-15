@@ -336,6 +336,29 @@ class LoteInteligenteReq(BaseModel):
     tmdb_key: str = ""
 
 
+
+def _limpar_nome_stream(url: str, nome_m3u: str):
+    bruto = (nome_m3u or "").strip()
+    if not bruto:
+        slug = url.split("?")[0].rstrip("/").split("/")[-1]
+        slug = re.sub(r"\.(?:m3u8|mp4|mkv|avi|ts)$", "", slug, flags=re.I)
+        bruto = re.sub(r"[._-]+", " ", slug).strip()
+
+    qual = "1080p" if re.search(r"1080|fhd", bruto + " " + url, re.I) else ("4K" if re.search(r"4k|2160|uhd", bruto + " " + url, re.I) else "720p")
+    audio = "Legendado" if re.search(r"\bleg\b|legendado|sub", bruto, re.I) else "Dublado"
+
+    if re.search(r"S\d{1,2}E\d{1,2}|\d{1,2}x\d{1,2}|temporada|epis[oó]dio", bruto, re.I):
+        cat = "Série"
+    elif re.search(r"\btv\b|ao vivo|fhd|hd|sd|canal|esporte|globo|sbt|record|band|premiere|combate|hbo|telecine", bruto, re.I) and not re.search(r"\(\d{4}\)", bruto):
+        cat = "TV ao Vivo"
+    else:
+        cat = "Filme"
+
+    limpo = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", bruto)
+    limpo = re.sub(r"\b(?:S\d{1,2}E\d{1,2}|\d{1,2}x\d{1,2}|1080p|720p|480p|4k|fhd|hd|sd|dublado|legendado|dub|leg|nacional|dual|bluray|web-dl|webrip|h264|x264|x265)\b", " ", limpo, flags=re.I)
+    limpo = re.sub(r"\s+", " ", limpo).strip(" -_|:")
+    return (limpo or "Sem Título", cat, qual, audio)
+
 _status_lote = {"rodando": False, "mensagem": "Nenhum lote executado ainda."}
 
 async def _processar_lote_bg(req: LoteInteligenteReq):
