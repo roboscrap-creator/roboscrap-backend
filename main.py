@@ -335,30 +335,8 @@ class LoteInteligenteReq(BaseModel):
     supabase_key: str = ""
     tmdb_key: str = ""
 
-_status_lote = {"rodando": False, "mensagem": "Aguardando comando."}
 
-def _limpar_nome_stream(url_stream: str, titulo_bruto: str = ""):
-    lower = url_stream.lower()
-    is_serie = bool(re.search(r"(s\\d{1,2}e\\d{1,2}|/\\d{1,2}(leg|dub)/|temporada|season|episodio)", lower))
-    categoria = "Série" if is_serie else "Filme"
-    qual = "4K" if ("2160" in lower or "4k" in lower) else ("1080p" if "1080" in lower else ("720p" if "720" in lower else "1080p"))
-    audio = "Legendado" if ("leg" in lower and "dub" not in lower) else "Dublado"
-
-    titulo = titulo_bruto.strip()
-    if not titulo:
-        try:
-            path = url_stream.split("?")[0].rstrip("/")
-            segs = [s for s in path.split("/") if s]
-            if segs:
-                alvo = segs[-3] if (is_serie and len(segs) >= 3) else segs[-1]
-                alvo = re.sub(r"\\.(mp4|m3u8|mkv|avi)$", "", alvo, flags=re.I)
-                alvo = re.sub(r"[-_](dub|leg|dual|720p|1080p|4k|alto|baixo|hd|fhd).*$", "", alvo, flags=re.I)
-                alvo = re.sub(r"[-_.]", " ", alvo).strip()
-                if alvo:
-                    titulo = alvo[0].upper() + alvo[1:]
-        except Exception:
-            pass
-    return titulo or "Sem Título", categoria, qual, audio
+_status_lote = {"rodando": False, "mensagem": "Nenhum lote executado ainda."}
 
 async def _processar_lote_bg(req: LoteInteligenteReq):
     global _status_lote
@@ -367,24 +345,30 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
     tmdb_key = req.tmdb_key or os.getenv("TMDB_KEY", "")
 
     if not sb_key:
-        _status_lote = {"rodando": False, "mensagem": "Erro: SUPABASE_KEY ausente."}
+        _status_lote = {"rodando": False, "mensagem": "Erro: SUPABASE_KEY ausente. Salve suas chaves na aba Chaves."}
         return
 
-    _status_lote = {"rodando": True, "mensagem": "Baixando fonte e sincronizando catálogo existente..."}
+    fonte = req.fonte_url.strip()
+    if "gist.github.com/" in fonte and "/raw" not in fonte:
+        fonte = fonte.rstrip("/") + "/raw"
+
+    _status_lote = {"rodando": True, "mensagem": "Baixando fonte e verificando catálogo existente..."}
     headers_sb = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}", "Content-Type": "application/json"}
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
             r_exist = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=url_stream", headers=headers_sb)
             urls_existentes = {item.get("url_stream", "").strip() for item in (r_exist.json() if r_exist.status_code == 200 else [])}
 
-            r_src = await client.get(req.fonte_url, headers={"User-Agent": "Mozilla/5.0"})
-            texto = r_src.text
+            r_src = await client.get(fonte, headers={"User-Agent": "Mozilla/5.0"})
+            if r_src.status_code != 200:
+                _status_lote = {"rodando": False, "mensagem": f"Erro ao baixar lista (HTTP {r_src.status_code})."}
+                return
 
+            texto = r_src.text
             itens_brutos = []
-            linhas = texto.splitlines()
             ultimo_nome = ""
-            for linha in linhas:
+            for linha in texto.splitlines():
                 l = linha.strip()
                 if l.startswith("#EXTINF"):
                     ultimo_nome = l.split(",")[-1].strip()
@@ -407,18 +391,23 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     continue
                 vistos.add(u_clean)
                 candidatos.append((u_clean, nome_m3u))
-
-            if req.limite > 0:
-                candidatos = candidatos[:req.limite]
+                if req.limite > 0 and len(candidatos) >= req.limite:
+                    break
 
             total = len(candidatos)
             if total == 0:
-                _status_lote = {"rodando": False, "mensagem": "Nenhum link inédito encontrado com esses filtros."}
+                _status_lote = {
+                    "rodando": False,
+                    "mensagem": f"Concluído: {len(itens_brutos)} links lidos na fonte, mas 0 novos (todos já estão no catálogo ou fora do filtro)."
+                }
                 return
 
             cache_tmdb = {}
             publicados = 0
             curadoria = 0
+            erros_db = 0
+            ultimo_erro_db = ""
+            buffer_lote = []
 
             for idx, (u, nome_m3u) in enumerate(candidatos, 1):
                 if idx % 10 == 0 or idx == 1:
@@ -457,7 +446,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     meta = {"titulo": titulo_limpo, "capa": "", "banner": "", "sinopse": "", "ano": 2026, "achou": False}
 
                 aprovado_auto = bool(req.auto_aprovar and meta["achou"])
-                payload = {
+                buffer_lote.append({
                     "titulo": meta["titulo"],
                     "categoria": categoria,
                     "url_stream": u,
@@ -470,18 +459,25 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     "ano": meta["ano"],
                     "aprovado": aprovado_auto,
                     "link_ativo": True,
-                }
-                r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=payload)
-                if r_ins.status_code in (200, 201):
-                    if aprovado_auto:
-                        publicados += 1
-                    else:
-                        curadoria += 1
+                })
 
-            _status_lote = {
-                "rodando": False,
-                "mensagem": f"Lote finalizado! {publicados} publicados direto (TMDB OK) e {curadoria} enviados para Curadoria."
-            }
+                if len(buffer_lote) >= 20 or idx == total:
+                    r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=buffer_lote)
+                    if r_ins.status_code in (200, 201):
+                        for item in buffer_lote:
+                            if item["aprovado"]:
+                                publicados += 1
+                            else:
+                                curadoria += 1
+                    else:
+                        erros_db += len(buffer_lote)
+                        ultimo_erro_db = f"HTTP {r_ins.status_code}: {r_ins.text[:120]}"
+                    buffer_lote = []
+
+            msg_final = f"Lote finalizado! {publicados} publicados direto e {curadoria} em Curadoria (lidos: {len(itens_brutos)})."
+            if erros_db > 0:
+                msg_final += f" Falhas ao salvar ({erros_db}): {ultimo_erro_db}"
+            _status_lote = {"rodando": False, "mensagem": msg_final}
     except Exception as e:
         _status_lote = {"rodando": False, "mensagem": f"Erro no lote: {e}"}
 
