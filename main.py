@@ -393,7 +393,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     ultimo_nome = ""
 
             if not itens_brutos:
-                encontrados = re.findall(r"https?://[^\\s\\"\\x27<>]+\\.(?:m3u8|mp4|mkv)(?:\\?[^\\s\\"\\x27<>]*)?", texto, flags=re.I)
+                encontrados = re.findall(r'https?://[^\s"\'<>]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>]*)?', texto, flags=re.I)
                 itens_brutos = [(u, "") for u in dict.fromkeys(encontrados)]
 
             filtro_low = req.filtro.strip().lower()
