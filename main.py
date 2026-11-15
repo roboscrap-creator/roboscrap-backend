@@ -380,8 +380,10 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
 
     try:
         async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
-            r_exist = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=url_stream", headers=headers_sb)
-            urls_existentes = {item.get("url_stream", "").strip() for item in (r_exist.json() if r_exist.status_code == 200 else [])}
+            r_exist = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=*", headers=headers_sb)
+            dados_exist = r_exist.json() if r_exist.status_code == 200 else []
+            colunas_validas = set(dados_exist[0].keys()) if dados_exist else {"titulo", "categoria", "url_stream", "capa_url", "banner_url", "sinopse", "genero", "ano", "aprovado", "link_ativo"}
+            urls_existentes = {item.get("url_stream", "").strip() for item in dados_exist}
 
             r_src = await client.get(fonte, headers={"User-Agent": "Mozilla/5.0"})
             if r_src.status_code != 200:
@@ -469,7 +471,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     meta = {"titulo": titulo_limpo, "capa": "", "banner": "", "sinopse": "", "ano": 2026, "achou": False}
 
                 aprovado_auto = bool(req.auto_aprovar and meta["achou"])
-                buffer_lote.append({
+                item_raw = {
                     "titulo": meta["titulo"],
                     "categoria": categoria,
                     "url_stream": u,
@@ -481,7 +483,8 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     "ano": meta["ano"],
                     "aprovado": aprovado_auto,
                     "link_ativo": True,
-                })
+                }
+                buffer_lote.append({k: v for k, v in item_raw.items() if k in colunas_validas})
 
                 if len(buffer_lote) >= 20 or idx == total:
                     r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=buffer_lote)
