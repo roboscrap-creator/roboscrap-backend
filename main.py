@@ -337,8 +337,9 @@ class LoteInteligenteReq(BaseModel):
 
 
 
-def _limpar_nome_stream(url: str, nome_m3u: str):
+def _limpar_nome_stream(url: str, nome_m3u: str, grupo_m3u: str = ""):
     bruto = (nome_m3u or "").strip()
+    grupo = (grupo_m3u or "").strip().lower()
     if not bruto:
         slug = url.split("?")[0].rstrip("/").split("/")[-1]
         slug = re.sub(r"\.(?:m3u8|mp4|mkv|avi|ts)$", "", slug, flags=re.I)
@@ -347,15 +348,19 @@ def _limpar_nome_stream(url: str, nome_m3u: str):
     qual = "1080p" if re.search(r"1080|fhd", bruto + " " + url, re.I) else ("4K" if re.search(r"4k|2160|uhd", bruto + " " + url, re.I) else "720p")
     audio = "Legendado" if re.search(r"\bleg\b|legendado|sub", bruto, re.I) else "Dublado"
 
-    if re.search(r"S\d{1,2}E\d{1,2}|\d{1,2}x\d{1,2}|temporada|epis[oó]dio", bruto, re.I):
+    tem_ep = bool(re.search(r"S\d{1,2}\s*E\d{1,2}|\d{1,2}x\d{1,2}|\bT\d{1,2}\b|temporada|epis[oó]dio", bruto, re.I))
+    e_canal_grupo = bool(re.search(r"canais|canal|tv\b|ao vivo|esporte|abertos|variedades|24h|infantil|noticias|notícias", grupo, re.I)) and not re.search(r"filme|s[eé]rie|novela|anime|vod", grupo, re.I)
+    e_canal_nome = bool(re.search(r"^(?:tv\s|canal\s|globo|sbt|record|band|rede\s?tv|espn|sportv|premiere|combate|telecine|hbo|megapix|tnt|warner|sony|axn|fox|star\s?channel|discovery|natgeo|cartoon|nickelodeon|cnn|globonews)\b", bruto, re.I))
+
+    if tem_ep or re.search(r"s[eé]rie|novela|anime", grupo, re.I):
         cat = "Série"
-    elif re.search(r"\btv\b|ao vivo|fhd|hd|sd|canal|esporte|globo|sbt|record|band|premiere|combate|hbo|telecine", bruto, re.I) and not re.search(r"\(\d{4}\)", bruto):
+    elif e_canal_grupo or e_canal_nome:
         cat = "TV ao Vivo"
     else:
         cat = "Filme"
 
     limpo = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", bruto)
-    limpo = re.sub(r"\b(?:S\d{1,2}E\d{1,2}|\d{1,2}x\d{1,2}|1080p|720p|480p|4k|fhd|hd|sd|dublado|legendado|dub|leg|nacional|dual|bluray|web-dl|webrip|h264|x264|x265)\b", " ", limpo, flags=re.I)
+    limpo = re.sub(r"\b(?:S\d{1,2}\s*E\d{1,2}|\d{1,2}x\d{1,2}|T\d{1,2}|1080p|720p|480p|4k|fhd|hd|sd|dublado|legendado|dub|leg|nacional|dual|bluray|web-dl|webrip|h264|x264|x265)\b", " ", limpo, flags=re.I)
     limpo = re.sub(r"\s+", " ", limpo).strip(" -_|:")
     return (limpo or "Sem Título", cat, qual, audio)
 
@@ -393,29 +398,33 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
             texto = r_src.text
             itens_brutos = []
             ultimo_nome = ""
+            ultimo_grupo = ""
             for linha in texto.splitlines():
                 l = linha.strip()
                 if l.startswith("#EXTINF"):
                     ultimo_nome = l.split(",")[-1].strip()
+                    m_grp = re.search(r'group-title="([^"]*)"', l, flags=re.I)
+                    ultimo_grupo = m_grp.group(1).strip() if m_grp else ""
                 elif l.startswith("http"):
-                    itens_brutos.append((l, ultimo_nome))
+                    itens_brutos.append((l, ultimo_nome, ultimo_grupo))
                     ultimo_nome = ""
+                    ultimo_grupo = ""
 
             if not itens_brutos:
                 encontrados = re.findall(r'https?://[^\s"\'<>]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>]*)?', texto, flags=re.I)
-                itens_brutos = [(u, "") for u in dict.fromkeys(encontrados)]
+                itens_brutos = [(u, "", "") for u in dict.fromkeys(encontrados)]
 
             filtro_low = req.filtro.strip().lower()
             candidatos = []
             vistos = set()
-            for u, nome_m3u in itens_brutos:
+            for u, nome_m3u, grupo_m3u in itens_brutos:
                 u_clean = u.strip()
                 if u_clean in urls_existentes or u_clean in vistos:
                     continue
-                if filtro_low and filtro_low not in u_clean.lower() and filtro_low not in nome_m3u.lower():
+                if filtro_low and filtro_low not in u_clean.lower() and filtro_low not in nome_m3u.lower() and filtro_low not in grupo_m3u.lower():
                     continue
                 vistos.add(u_clean)
-                candidatos.append((u_clean, nome_m3u))
+                candidatos.append((u_clean, nome_m3u, grupo_m3u))
                 if req.limite > 0 and len(candidatos) >= req.limite:
                     break
 
@@ -434,11 +443,11 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
             ultimo_erro_db = ""
             buffer_lote = []
 
-            for idx, (u, nome_m3u) in enumerate(candidatos, 1):
+            for idx, (u, nome_m3u, grupo_m3u) in enumerate(candidatos, 1):
                 if idx % 10 == 0 or idx == 1:
                     _status_lote = {"rodando": True, "mensagem": f"Processando {idx}/{total} (Publicados: {publicados} | Curadoria: {curadoria})..."}
 
-                titulo_limpo, categoria, qual, audio = _limpar_nome_stream(u, nome_m3u)
+                titulo_limpo, categoria, qual, audio = _limpar_nome_stream(u, nome_m3u, grupo_m3u)
                 chave_cache = f"{categoria}:{titulo_limpo.lower()}"
 
                 meta = cache_tmdb.get(chave_cache)
@@ -461,6 +470,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                                     "sinopse": m.get("overview") or "",
                                     "ano": int(data_str[:4]) if len(data_str) >= 4 and data_str[:4].isdigit() else 2026,
                                     "achou": bool(m.get("poster_path")),
+                                    "media_type": m.get("media_type", ""),
                                 }
                     except Exception:
                         pass
@@ -470,6 +480,11 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 elif meta is None:
                     meta = {"titulo": titulo_limpo, "capa": "", "banner": "", "sinopse": "", "ano": 2026, "achou": False}
 
+                if categoria != "TV ao Vivo":
+                    if meta.get("media_type") == "tv":
+                        categoria = "Série"
+                    elif meta.get("media_type") == "movie":
+                        categoria = "Filme"
                 aprovado_auto = bool(req.auto_aprovar and meta["achou"])
                 item_raw = {
                     "titulo": meta["titulo"],
