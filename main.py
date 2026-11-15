@@ -416,6 +416,20 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
             dados_exist = []
             offset_db = 0
             while True:
+                r_pag = await client.get(
+                    f"{sb_url}/rest/v1/catalogo_midia?select=url_stream&order=id.asc",
+                    headers={**headers_sb, "Range": f"{offset_db}-{offset_db+999}"},
+                )
+                if r_pag.status_code not in (200, 206):
+                    break
+                lote_pag = r_pag.json() or []
+                dados_exist.extend(lote_pag)
+                if len(lote_pag) < 1000:
+                    break
+                offset_db += 1000
+            r_cols = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=*&limit=1", headers=headers_sb)
+            sample_cols = r_cols.json() if r_cols.status_code == 200 else []
+            colunas_validas = set(sample_cols[0].keys()) if sample_cols else {"titulo", "categoria", "url_stream", "capa_url", "banner_url", "sinopse", "genero", "ano", "aprovado", "link_ativo"}
                 r_pag = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=url_stream&order=id.asc", headers={**headers_sb, "Range": f"{offset_db}-{offset_db+999}"})
                 if r_pag.status_code not in (200, 206):
                     break
