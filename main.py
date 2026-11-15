@@ -345,10 +345,38 @@ def _limpar_nome_stream(url: str, nome_m3u: str, grupo_m3u: str = ""):
         slug = re.sub(r"\.(?:m3u8|mp4|mkv|avi|ts)$", "", slug, flags=re.I)
         bruto = re.sub(r"[._-]+", " ", slug).strip()
 
-    qual = "1080p" if re.search(r"1080|fhd", bruto + " " + url, re.I) else ("4K" if re.search(r"4k|2160|uhd", bruto + " " + url, re.I) else "720p")
-    audio = "Legendado" if re.search(r"\bleg\b|legendado|sub", bruto, re.I) else "Dublado"
+    texto_analise = f"{bruto} {grupo} {url}"
+    if re.search(r"4k|2160|uhd", texto_analise, re.I):
+        qual = "4K"
+    elif re.search(r"1080|fhd|full\s*hd|alto", texto_analise, re.I):
+        qual = "1080p"
+    elif re.search(r"720|\bhd\b", texto_analise, re.I):
+        qual = "720p"
+    elif re.search(r"480|360|\bsd\b|baixo", texto_analise, re.I):
+        qual = "SD"
+    else:
+        qual = "1080p"
 
-    tem_ep = bool(re.search(r"S\d{1,2}\s*E\d{1,2}|\d{1,2}x\d{1,2}|\bT\d{1,2}\b|temporada|epis[oó]dio", bruto, re.I))
+    if re.search(r"dual", texto_analise, re.I):
+        audio = "Dual Áudio"
+        idiomas = ["PT", "EN"]
+    elif re.search(r"\bleg\b|legendado|sub|/\d*leg/", texto_analise, re.I):
+        audio = "Legendado"
+        idiomas = ["EN"]
+    elif re.search(r"\bdub\b|dublado|nacional|pt-?br", texto_analise, re.I):
+        audio = "Dublado"
+        idiomas = ["PT"]
+    else:
+        audio = "Dublado"
+        idiomas = ["PT"]
+
+    formato = "m3u8" if ".m3u8" in url.lower() else ("mkv" if ".mkv" in url.lower() else "mp4")
+
+    m_ep = re.search(r"S(\d{1,2})\s*E(\d{1,2})|(\d{1,2})x(\d{1,2})", bruto, re.I)
+    temp_num = int(m_ep.group(1) or m_ep.group(3)) if m_ep else None
+    ep_num = int(m_ep.group(2) or m_ep.group(4)) if m_ep else None
+
+    tem_ep = bool(m_ep or re.search(r"\bT\d{1,2}\b|temporada|epis[oó]dio", bruto, re.I))
     e_canal_grupo = bool(re.search(r"canais|canal|tv\b|ao vivo|esporte|abertos|variedades|24h|infantil|noticias|notícias", grupo, re.I)) and not re.search(r"filme|s[eé]rie|novela|anime|vod", grupo, re.I)
     e_canal_nome = bool(re.search(r"^(?:tv\s|canal\s|globo|sbt|record|band|rede\s?tv|espn|sportv|premiere|combate|telecine|hbo|megapix|tnt|warner|sony|axn|fox|star\s?channel|discovery|natgeo|cartoon|nickelodeon|cnn|globonews)\b", bruto, re.I))
 
@@ -362,7 +390,7 @@ def _limpar_nome_stream(url: str, nome_m3u: str, grupo_m3u: str = ""):
     limpo = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", bruto)
     limpo = re.sub(r"\b(?:S\d{1,2}\s*E\d{1,2}|\d{1,2}x\d{1,2}|T\d{1,2}|1080p|720p|480p|4k|fhd|hd|sd|dublado|legendado|dub|leg|nacional|dual|bluray|web-dl|webrip|h264|x264|x265)\b", " ", limpo, flags=re.I)
     limpo = re.sub(r"\s+", " ", limpo).strip(" -_|:")
-    return (limpo or "Sem Título", cat, qual, audio)
+    return (limpo or "Sem Título", cat, qual, audio, idiomas, formato, temp_num, ep_num)
 
 _status_lote = {"rodando": False, "mensagem": "Nenhum lote executado ainda."}
 
@@ -447,7 +475,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 if idx % 10 == 0 or idx == 1:
                     _status_lote = {"rodando": True, "mensagem": f"Processando {idx}/{total} (Publicados: {publicados} | Curadoria: {curadoria})..."}
 
-                titulo_limpo, categoria, qual, audio = _limpar_nome_stream(u, nome_m3u, grupo_m3u)
+                titulo_limpo, categoria, qual, audio, idiomas, formato, temp_num, ep_num = _limpar_nome_stream(u, nome_m3u, grupo_m3u)
                 chave_cache = f"{categoria}:{titulo_limpo.lower()}"
 
                 meta = cache_tmdb.get(chave_cache)
@@ -470,6 +498,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                                     "sinopse": m.get("overview") or "",
                                     "ano": int(data_str[:4]) if len(data_str) >= 4 and data_str[:4].isdigit() else 2026,
                                     "achou": bool(m.get("poster_path")),
+                                    "tmdb_id": m.get("id"),
                                     "media_type": m.get("media_type", ""),
                                 }
                     except Exception:
@@ -487,10 +516,17 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                         categoria = "Filme"
                 aprovado_auto = bool(req.auto_aprovar and meta["achou"])
                 item_raw = {
+                    "tmdb_id": meta.get("tmdb_id"),
                     "titulo": meta["titulo"],
                     "categoria": categoria,
+                    "serie_nome": meta["titulo"] if categoria == "Série" else None,
+                    "temporada": temp_num,
+                    "episodio": ep_num,
                     "url_stream": u,
-                    "qualidade": qual,
+                    "formato": formato,
+                    "resolucao": qual,
+                    "tipo_audio": audio,
+                    "idiomas_audio": idiomas,
                     "capa_url": meta["capa"],
                     "banner_url": meta["banner"],
                     "sinopse": meta["sinopse"],
