@@ -76,8 +76,7 @@ def _limpar_nome_stream(url: str, nome_m3u: str = "", grupo_m3u: str = ""):
     grupo = (grupo_m3u or "").strip().lower()
 
     if not bruto and is_magnet:
-        info_mag = extrair_info_magnet(url)
-        bruto = info_mag["nome_dn"]
+        bruto = extrair_info_magnet(url)["nome_dn"]
 
     if not bruto:
         slug = url.split("?")[0].rstrip("/").split("/")[-1]
@@ -99,26 +98,13 @@ def _limpar_nome_stream(url: str, nome_m3u: str = "", grupo_m3u: str = ""):
         qual = "1080p"
 
     if re.search(r"dual", texto_analise, re.I):
-        audio = "Dual Áudio"
-        idiomas = ["PT", "EN"]
+        audio, idiomas = "Dual Áudio", ["PT", "EN"]
     elif re.search(r"\bleg\b|legendado|sub|/\d*leg/", texto_analise, re.I):
-        audio = "Legendado"
-        idiomas = ["EN"]
-    elif re.search(r"\bdub\b|dublado|nacional|pt-?br", texto_analise, re.I):
-        audio = "Dublado"
-        idiomas = ["PT"]
+        audio, idiomas = "Legendado", ["EN"]
     else:
-        audio = "Dublado"
-        idiomas = ["PT"]
+        audio, idiomas = "Dublado", ["PT"]
 
-    if is_magnet:
-        formato = "torrent"
-    elif ".m3u8" in url.lower():
-        formato = "m3u8"
-    elif ".mkv" in url.lower():
-        formato = "mkv"
-    else:
-        formato = "mp4"
+    formato = "torrent" if is_magnet else ("m3u8" if ".m3u8" in url.lower() else ("mkv" if ".mkv" in url.lower() else "mp4"))
 
     m_ep = re.search(r"(?:S|T)\s*(\d{1,2})\s*[\|\-:\.\s]*E(?:P)?\s*(\d{1,3})|(\d{1,2})\s*[xX]\s*(\d{1,3})", bruto_norm, re.I)
     temp_num = int(m_ep.group(1) or m_ep.group(3)) if m_ep else None
@@ -181,7 +167,6 @@ def parse_lista_mista(conteudo: str) -> List[dict]:
 
 
 async def buscar_imdb_sugestao(client: httpx.AsyncClient, termo: str) -> dict:
-    """Consulta a API pública de sugestões do IMDb (sem precisar de chave paga) para obter imdb_id, capa e ano."""
     limpo = re.sub(r"[^a-zA-Z0-9\s]", "", termo).strip().lower()
     if not limpo:
         return {}
@@ -195,8 +180,7 @@ async def buscar_imdb_sugestao(client: httpx.AsyncClient, termo: str) -> dict:
         )
         if r.status_code != 200:
             return {}
-        d_list = r.json().get("d") or []
-        for item in d_list:
+        for item in (r.json().get("d") or []):
             imdb_id = item.get("id", "")
             if imdb_id.startswith("tt"):
                 img_obj = item.get("i") or {}
@@ -212,13 +196,7 @@ async def buscar_imdb_sugestao(client: httpx.AsyncClient, termo: str) -> dict:
     return {}
 
 
-async def enriquecer_tmdb_e_imdb(
-    client: httpx.AsyncClient,
-    query: str,
-    categoria: str,
-    tmdb_key: str,
-    imdb_id_forcado: str = "",
-) -> dict:
+async def enriquecer_tmdb_e_imdb(client: httpx.AsyncClient, query: str, categoria: str, tmdb_key: str, imdb_id_forcado: str = "") -> dict:
     if categoria == "TV Ao Vivo":
         return {}
 
@@ -249,10 +227,7 @@ async def enriquecer_tmdb_e_imdb(
         return resultado
 
     try:
-        top = None
-        media_type = ""
-
-        # 1. Se temos imdb_id (tt...), busca exata via /find no TMDB
+        top, media_type = None, ""
         if imdb_id:
             r_find = await client.get(
                 f"https://api.themoviedb.org/3/find/{imdb_id}",
@@ -262,13 +237,10 @@ async def enriquecer_tmdb_e_imdb(
             if r_find.status_code == 200:
                 df = r_find.json()
                 if df.get("movie_results"):
-                    top = df["movie_results"][0]
-                    media_type = "movie"
+                    top, media_type = df["movie_results"][0], "movie"
                 elif df.get("tv_results"):
-                    top = df["tv_results"][0]
-                    media_type = "tv"
+                    top, media_type = df["tv_results"][0], "tv"
 
-        # 2. Fallback por título no /search/multi
         if top is None and query.strip():
             r_search = await client.get(
                 "https://api.themoviedb.org/3/search/multi",
@@ -287,9 +259,8 @@ async def enriquecer_tmdb_e_imdb(
             banner = f"https://image.tmdb.org/t/p/original{top['backdrop_path']}" if top.get("backdrop_path") else ""
             data_lanc = str(top.get("release_date") or top.get("first_air_date") or "")
             vote = top.get("vote_average")
-
-            # Busca detalhes completos (gêneros + external_ids para garantir imdb_id)
             generos_str = ""
+
             if tmdb_id and media_type:
                 try:
                     r_det = await client.get(
@@ -299,8 +270,7 @@ async def enriquecer_tmdb_e_imdb(
                     )
                     if r_det.status_code == 200:
                         det = r_det.json()
-                        gens = [g.get("name", "") for g in (det.get("genres") or []) if g.get("name")]
-                        generos_str = ", ".join(gens)
+                        generos_str = ", ".join([g.get("name", "") for g in (det.get("genres") or []) if g.get("name")])
                         ext_imdb = (det.get("external_ids") or {}).get("imdb_id")
                         if ext_imdb:
                             imdb_id = ext_imdb
@@ -348,6 +318,20 @@ class BuscarMetadadosReq(BaseModel):
 class AnalisarTorrentReq(BaseModel):
     magnet_url: str
     tmdb_key: Optional[str] = None
+
+
+class ExtrairSiteReq(BaseModel):
+    site_url: str
+
+
+class LoteInteligenteReq(BaseModel):
+    fonte_url: str
+    limite: int = 100
+    filtro: str = ""
+    auto_aprovar: bool = True
+    supabase_url: str = ""
+    supabase_key: str = ""
+    tmdb_key: str = ""
 
 
 @app.get("/")
@@ -406,7 +390,6 @@ async def processar_importacao_m3u(req: ImportarM3URequest):
         resp = await client.get(req.m3u_url, timeout=25.0)
         resp.raise_for_status()
         itens = parse_lista_mista(resp.text)
-
         global INDICE_M3U
         INDICE_M3U = itens
 
@@ -433,21 +416,13 @@ async def processar_importacao_m3u(req: ImportarM3URequest):
                 "link_ativo": True,
             }
             if sb_key:
-                await client.post(
-                    f"{SUPABASE_URL}/rest/v1/catalogo_midia",
-                    headers=sb_headers(sb_key),
-                    json=payload,
-                    timeout=10.0,
-                )
+                await client.post(f"{SUPABASE_URL}/rest/v1/catalogo_midia", headers=sb_headers(sb_key), json=payload, timeout=10.0)
 
 
 @app.post("/importar-m3u")
 async def importar_m3u(req: ImportarM3URequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(processar_importacao_m3u, req)
-    return {
-        "ok": True,
-        "mensagem": f"Importação M3U/Torrent iniciada em segundo plano (até {req.limite} itens).",
-    }
+    return {"ok": True, "mensagem": f"Importação M3U/Torrent iniciada em segundo plano (até {req.limite} itens)."}
 
 
 @app.post("/buscar-link")
@@ -458,23 +433,9 @@ async def buscar_link(req: BuscarLinkRequest):
             resp = await client.get(req.m3u_url, timeout=20.0)
             resp.raise_for_status()
             INDICE_M3U = parse_lista_mista(resp.text)
-
         termo = req.titulo.lower().strip()
         candidatos = [i for i in INDICE_M3U if termo in i["titulo"].lower()]
-        validos = []
-        for cand in candidatos[:8]:
-            u = cand["url_stream"]
-            if u.lower().startswith("magnet:?"):
-                validos.append(cand)
-                continue
-            try:
-                head = await client.get(u, headers={"Range": "bytes=0-256", "User-Agent": "Mozilla/5.0"}, timeout=6.0)
-                if head.status_code < 400:
-                    validos.append(cand)
-            except Exception:
-                continue
-
-        return {"ok": True, "resultados": validos or candidatos[:5]}
+        return {"ok": True, "resultados": candidatos[:8]}
 
 
 @app.post("/verificar-links")
@@ -482,16 +443,10 @@ async def verificar_links(supabase_key: Optional[str] = None):
     sb_key = supabase_key or SUPABASE_KEY
     if not sb_key:
         raise HTTPException(status_code=400, detail="SUPABASE_SERVICE_KEY não configurada.")
-
     inativos = 0
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        res = await client.get(
-            f"{SUPABASE_URL}/rest/v1/catalogo_midia?select=id,url_stream,link_ativo",
-            headers=sb_headers(sb_key),
-            timeout=15.0,
-        )
-        itens = res.json()
-        for item in itens:
+        res = await client.get(f"{SUPABASE_URL}/rest/v1/catalogo_midia?select=id,url_stream,link_ativo", headers=sb_headers(sb_key), timeout=15.0)
+        for item in res.json():
             url = (item.get("url_stream") or "").strip()
             if not url:
                 continue
@@ -501,30 +456,15 @@ async def verificar_links(supabase_key: Optional[str] = None):
                 ativo = False
             else:
                 try:
-                    chk = await client.get(
-                        url,
-                        headers={"Range": "bytes=0-512", "User-Agent": "Mozilla/5.0"},
-                        timeout=7.0,
-                    )
+                    chk = await client.get(url, headers={"Range": "bytes=0-512", "User-Agent": "Mozilla/5.0"}, timeout=7.0)
                     ativo = chk.status_code < 400
                 except Exception:
                     ativo = False
-
             if ativo != item.get("link_ativo", True):
-                await client.patch(
-                    f"{SUPABASE_URL}/rest/v1/catalogo_midia?id=eq.{item['id']}",
-                    headers=sb_headers(sb_key),
-                    json={"link_ativo": ativo},
-                    timeout=10.0,
-                )
+                await client.patch(f"{SUPABASE_URL}/rest/v1/catalogo_midia?id=eq.{item['id']}", headers=sb_headers(sb_key), json={"link_ativo": ativo}, timeout=10.0)
                 if not ativo:
                     inativos += 1
-
     return {"ok": True, "links_desativados": inativos}
-
-
-class ExtrairSiteReq(BaseModel):
-    site_url: str
 
 
 @app.post("/extrair-site")
@@ -532,28 +472,11 @@ async def extrair_site(req: ExtrairSiteReq):
     url_alvo = req.site_url.strip()
     if not url_alvo.startswith("http"):
         url_alvo = "https://" + url_alvo
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-        "Referer": url_alvo,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    padrao_stream = re.compile(
-        r'https?://[^\s"\'<>\\]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>\\]*)?',
-        re.IGNORECASE,
-    )
-    padrao_magnet = re.compile(
-        r'magnet:\?xt=urn:btih:[^\s"\'<>\\]+',
-        re.IGNORECASE,
-    )
-    padrao_iframe = re.compile(
-        r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']',
-        re.IGNORECASE,
-    )
-
-    encontrados = []
-    vistos = set()
+    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36", "Referer": url_alvo}
+    padrao_stream = re.compile(r'https?://[^\s"\'<>\\]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>\\]*)?', re.I)
+    padrao_magnet = re.compile(r'magnet:\?xt=urn:btih:[^\s"\'<>\\]+', re.I)
+    padrao_iframe = re.compile(r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']', re.I)
+    encontrados, vistos = [], set()
 
     def extrair_de_html(texto_html: str, origem: str):
         limpo = texto_html.replace("\\/", "/").replace("&amp;", "&")
@@ -562,61 +485,30 @@ async def extrair_site(req: ExtrairSiteReq):
                 vistos.add(m)
                 info_m = extrair_info_magnet(m)
                 qual = "4K" if "2160" in m or "4k" in m.lower() else ("1080p" if "1080" in m else "720p")
-                encontrados.append({
-                    "url_stream": m,
-                    "titulo": info_m["nome_dn"],
-                    "formato": "TORRENT (Magnet)",
-                    "qualidade": qual,
-                    "origem": origem,
-                })
+                encontrados.append({"url_stream": m, "titulo": info_m["nome_dn"], "formato": "TORRENT (Magnet)", "qualidade": qual, "origem": origem})
         for m in padrao_stream.findall(limpo):
             if m not in vistos and not url_morta(m):
                 vistos.add(m)
                 qual = "4K" if "2160" in m or "4k" in m.lower() else ("1080p" if "1080" in m else ("720p" if "720" in m else "HD"))
-                encontrados.append({
-                    "url_stream": m,
-                    "formato": "HLS (.m3u8)" if ".m3u8" in m.lower() else "MP4/MKV",
-                    "qualidade": qual,
-                    "origem": origem,
-                })
+                encontrados.append({"url_stream": m, "formato": "HLS (.m3u8)" if ".m3u8" in m.lower() else "MP4/MKV", "qualidade": qual, "origem": origem})
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
             res = await client.get(url_alvo, headers=headers)
             html = res.text
-
-            m_titulo = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            m_titulo = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.DOTALL)
             titulo_pagina = re.sub(r"\s+", " ", m_titulo.group(1)).strip() if m_titulo else url_alvo
-
             extrair_de_html(html, "pagina_principal")
-
             if not encontrados:
-                iframes = padrao_iframe.findall(html)[:3]
-                for ifr in iframes:
+                for ifr in padrao_iframe.findall(html)[:3]:
                     try:
                         r_ifr = await client.get(ifr, headers={**headers, "Referer": url_alvo}, timeout=12.0)
                         extrair_de_html(r_ifr.text, "iframe_player")
                     except Exception:
                         pass
-
-        return {
-            "ok": True,
-            "titulo_pagina": titulo_pagina,
-            "total": len(encontrados),
-            "streams": encontrados,
-        }
+        return {"ok": True, "titulo_pagina": titulo_pagina, "total": len(encontrados), "streams": encontrados}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao ler site: {str(e)}")
-
-
-class LoteInteligenteReq(BaseModel):
-    fonte_url: str
-    limite: int = 100
-    filtro: str = ""
-    auto_aprovar: bool = True
-    supabase_url: str = ""
-    supabase_key: str = ""
-    tmdb_key: str = ""
 
 
 _status_lote = {"rodando": False, "mensagem": "Nenhum lote executado ainda."}
@@ -627,9 +519,8 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
     sb_url = (req.supabase_url or os.getenv("SUPABASE_URL", "https://kuziampmbltqdqkqyrlb.supabase.co")).rstrip("/")
     sb_key = req.supabase_key or os.getenv("SUPABASE_KEY", "")
     tmdb_key = req.tmdb_key or os.getenv("TMDB_KEY", "")
-
     if not sb_key:
-        _status_lote = {"rodando": False, "mensagem": "Erro: SUPABASE_KEY ausente. Salve suas chaves na aba Chaves."}
+        _status_lote = {"rodando": False, "mensagem": "Erro: SUPABASE_KEY ausente."}
         return
 
     fonte = req.fonte_url.strip()
@@ -641,13 +532,9 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
 
     try:
         async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
-            dados_exist = []
-            offset_db = 0
+            dados_exist, offset_db = [], 0
             while True:
-                r_pag = await client.get(
-                    f"{sb_url}/rest/v1/catalogo_midia?select=url_stream&order=id.asc",
-                    headers={**headers_sb, "Range": f"{offset_db}-{offset_db+999}"},
-                )
+                r_pag = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=url_stream&order=id.asc", headers={**headers_sb, "Range": f"{offset_db}-{offset_db+999}"})
                 if r_pag.status_code not in (200, 206):
                     break
                 lote_pag = r_pag.json() or []
@@ -658,9 +545,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
 
             r_cols = await client.get(f"{sb_url}/rest/v1/catalogo_midia?select=*&limit=1", headers=headers_sb)
             sample_cols = r_cols.json() if r_cols.status_code == 200 else []
-            colunas_validas = set(sample_cols[0].keys()) if sample_cols else {
-                "titulo", "categoria", "url_stream", "capa_url", "banner_url", "sinopse", "genero", "ano", "aprovado", "link_ativo"
-            }
+            colunas_validas = set(sample_cols[0].keys()) if sample_cols else {"titulo", "categoria", "url_stream", "capa_url", "banner_url", "sinopse", "genero", "ano", "aprovado", "link_ativo"}
             urls_existentes = {item.get("url_stream", "").strip() for item in dados_exist}
 
             r_src = await client.get(fonte, headers={"User-Agent": "Mozilla/5.0"})
@@ -669,9 +554,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 return
 
             texto = r_src.text
-            itens_brutos = []
-            ultimo_nome = ""
-            ultimo_grupo = ""
+            itens_brutos, ultimo_nome, ultimo_grupo = [], "", ""
             for linha in texto.splitlines():
                 l = linha.strip()
                 if l.startswith("#EXTINF"):
@@ -681,8 +564,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 elif l.startswith("http") or l.lower().startswith("magnet:?"):
                     if not url_morta(l):
                         itens_brutos.append((l, ultimo_nome, ultimo_grupo))
-                    ultimo_nome = ""
-                    ultimo_grupo = ""
+                    ultimo_nome, ultimo_grupo = "", ""
 
             if not itens_brutos:
                 encontrados_http = re.findall(r'https?://[^\s"\'<>]+\.(?:m3u8|mp4|mkv)(?:\?[^\s"\'<>]*)?', texto, flags=re.I)
@@ -691,8 +573,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 itens_brutos = [(u, "", "") for u in todos_links]
 
             filtro_low = req.filtro.strip().lower()
-            candidatos = []
-            vistos = set()
+            candidatos, vistos = [], set()
             for u, nome_m3u, grupo_m3u in itens_brutos:
                 u_clean = u.strip()
                 if u_clean in urls_existentes or u_clean in vistos:
@@ -706,26 +587,16 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
 
             total = len(candidatos)
             if total == 0:
-                _status_lote = {
-                    "rodando": False,
-                    "mensagem": f"Concluído: {len(itens_brutos)} links válidos lidos, 0 novos (já estão no catálogo ou fora do filtro).",
-                }
+                _status_lote = {"rodando": False, "mensagem": f"Concluído: {len(itens_brutos)} links lidos, 0 novos."}
                 return
 
-            cache_meta = {}
-            publicados = 0
-            curadoria = 0
-            erros_db = 0
-            ultimo_erro_db = ""
-            buffer_lote = []
-
+            cache_meta, publicados, curadoria, buffer_lote = {}, 0, 0, []
             for idx, (u, nome_m3u, grupo_m3u) in enumerate(candidatos, 1):
                 if idx % 10 == 0 or idx == 1:
                     _status_lote = {"rodando": True, "mensagem": f"Processando {idx}/{total} (Publicados: {publicados} | Curadoria: {curadoria})..."}
 
                 titulo_limpo, categoria, qual, audio, idiomas, formato, temp_num, ep_num = _limpar_nome_stream(u, nome_m3u, grupo_m3u)
                 chave_cache = f"{categoria}:{titulo_limpo.lower()}"
-
                 meta = cache_meta.get(chave_cache)
                 if meta is None:
                     meta = await enriquecer_tmdb_e_imdb(client, titulo_limpo, categoria, tmdb_key)
@@ -765,26 +636,16 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                 buffer_lote.append({k: v for k, v in item_raw.items() if k in colunas_validas})
 
                 if len(buffer_lote) >= 20 or idx == total:
-                    r_ins = await client.post(
-                        f"{sb_url}/rest/v1/catalogo_midia",
-                        headers={**headers_sb, "Prefer": "return=minimal"},
-                        json=buffer_lote,
-                    )
+                    r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=buffer_lote)
                     if r_ins.status_code in (200, 201):
                         for item in buffer_lote:
                             if item["aprovado"]:
                                 publicados += 1
                             else:
                                 curadoria += 1
-                    else:
-                        erros_db += len(buffer_lote)
-                        ultimo_erro_db = f"HTTP {r_ins.status_code}: {r_ins.text[:120]}"
                     buffer_lote = []
 
-            msg_final = f"Lote finalizado! {publicados} publicados direto e {curadoria} em Curadoria (lidos: {len(itens_brutos)})."
-            if erros_db > 0:
-                msg_final += f" Falhas ao salvar ({erros_db}): {ultimo_erro_db}"
-            _status_lote = {"rodando": False, "mensagem": msg_final}
+            _status_lote = {"rodando": False, "mensagem": f"Lote finalizado! {publicados} publicados direto e {curadoria} em Curadoria (lidos: {len(itens_brutos)})."}
     except Exception as e:
         _status_lote = {"rodando": False, "mensagem": f"Erro no lote: {e}"}
 
@@ -792,7 +653,7 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
 @app.post("/importar-lote-inteligente")
 async def importar_lote_inteligente(req: LoteInteligenteReq, background_tasks: BackgroundTasks):
     if _status_lote.get("rodando"):
-        return {"ok": False, "mensagem": "Já existe um lote rodando no servidor. Aguarde concluir."}
+        return {"ok": False, "mensagem": "Já existe um lote rodando no servidor."}
     background_tasks.add_task(_processar_lote_bg, req)
     return {"ok": True, "mensagem": "Importação inteligente (M3U + Torrent + TMDB/IMDb) iniciada no Render!"}
 
