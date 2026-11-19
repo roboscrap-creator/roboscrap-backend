@@ -736,3 +736,82 @@ async def stream_torbox(req: _TorBoxRequest):
             stream_url = _tb_re.sub(r"^https?://[^/]+", f"https://{cdn_host}", stream_url)
 
         return {"url": stream_url, "file_name": file_name, "source": "torbox"}
+
+
+# ==========================================
+# BUSCA E CONVERSAO DE LEGENDAS ONLINE
+# ==========================================
+import re
+
+@app.get("/legendas/buscar")
+async def buscar_legendas(
+    titulo: str = "",
+    tmdb_id: str = "",
+    tipo: str = "movie",
+    temporada: int = 0,
+    episodio: int = 0,
+):
+    resultados = []
+    imdb_id = ""
+    tmdb_key = os.getenv("TMDB_API_KEY", "")
+
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        # 1. Converte TMDB ID para IMDb ID (se disponivel) para busca exata
+        if tmdb_id and tmdb_key:
+            media_type = "tv" if ("serie" in tipo.lower() or "tv" in tipo.lower() or temporada > 0) else "movie"
+            try:
+                r_ext = await client.get(
+                    f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids",
+                    params={"api_key": tmdb_key},
+                )
+                if r_ext.status_code == 200:
+                    imdb_id = r_ext.json().get("imdb_id") or ""
+            except Exception:
+                pass
+
+        # 2. Consulta catalogo aberto do OpenSubtitles v3 via IMDb ID
+        if imdb_id:
+            if temporada > 0 and episodio > 0:
+                sub_url = f"https://opensubtitles-v3.strem.io/subtitles/series/{imdb_id}:{temporada}:{episodio}.json"
+            else:
+                sub_url = f"https://opensubtitles-v3.strem.io/subtitles/movie/{imdb_id}.json"
+            try:
+                r_sub = await client.get(sub_url)
+                if r_sub.status_code == 200:
+                    subs = r_sub.json().get("subtitles", [])
+                    for idx, s in enumerate(subs):
+                        lang = (s.get("lang") or "").lower()
+                        if any(k in lang for k in ["por", "pob", "pt", "eng", "spa"]):
+                            label_lang = "Português" if ("por" in lang or "pob" in lang or "pt" in lang) else ("Inglês" if "eng" in lang else "Espanhol")
+                            resultados.append({
+                                "id": f"os_{idx}",
+                                "idioma": label_lang,
+                                "codigo": lang,
+                                "nome": f"{label_lang} • OpenSubtitles #{idx + 1}",
+                                "url": s.get("url", ""),
+                            })
+            except Exception:
+                pass
+
+    return {"legendas": resultados[:25], "imdb_id": imdb_id}
+
+
+@app.get("/legendas/baixar")
+async def baixar_legenda_vtt(url: str):
+    from fastapi.responses import Response
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return Response(content="WEBVTT\n\n", media_type="text/vtt")
+        try:
+            texto = r.content.decode("utf-8")
+        except UnicodeDecodeError:
+            texto = r.content.decode("latin-1", errors="replace")
+
+        # Converte SRT para WEBVTT caso nao comece com WEBVTT
+        texto = texto.replace("\r\n", "\n").strip()
+        if not texto.startswith("WEBVTT"):
+            texto = re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", texto)
+            texto = "WEBVTT\n\n" + texto
+
+        return Response(content=texto, media_type="text/vtt; charset=utf-8")
