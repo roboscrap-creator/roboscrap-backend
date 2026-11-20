@@ -666,13 +666,20 @@ async def status_lote():
 # === TORBOX CLOUD STREAMING ===
 import os as _tb_os
 import re as _tb_re
+import time as _tb_time
 import asyncio as _tb_asyncio
 import httpx as _tb_httpx
 from pydantic import BaseModel as _TBBaseModel
 from fastapi import HTTPException as _TBHTTPException
 
+_TB_CACHE: dict[str, dict] = {}
+_TB_LOCKS: dict[str, _tb_asyncio.Lock] = {}
+_TB_TTL_SECONDS = 4 * 3600  # 4 horas de cache por torrent
+
+
 class _TorBoxRequest(_TBBaseModel):
     magnet: str
+
 
 @app.post("/stream-torbox")
 async def stream_torbox(req: _TorBoxRequest):
@@ -681,61 +688,85 @@ async def stream_torbox(req: _TorBoxRequest):
     if not api_key:
         raise _TBHTTPException(status_code=500, detail="TORBOX_API_KEY nao configurada")
 
-    tb_base = "https://api.torbox.app/v1/api"
-    headers = {"Authorization": f"Bearer {api_key}"}
     m = _tb_re.search(r"btih:([a-zA-Z0-9]{32,40})", req.magnet, _tb_re.IGNORECASE)
-    info_hash = m.group(1).lower() if m else ""
+    info_hash = m.group(1).lower() if m else req.magnet.strip()
 
-    async with _tb_httpx.AsyncClient(timeout=20.0) as client:
-        add_res = await client.post(
-            f"{tb_base}/torrents/createtorrent",
-            headers=headers,
-            data={"magnet": req.magnet, "seed": "1", "allow_zip": "false"},
-        )
-        add_data = add_res.json()
-        if not add_data.get("success") and "ALREADY" not in str(add_data.get("detail", "")).upper():
-            raise _TBHTTPException(status_code=400, detail=f"Erro TorBox: {add_data.get('detail')}")
+    # 1. Retorna imediatamente do cache se valido (< 4h)
+    agora = _tb_time.time()
+    cached = _TB_CACHE.get(info_hash)
+    if cached and cached["exp"] > agora:
+        return {"url": cached["url"], "file_name": cached["file_name"], "source": "torbox-cache"}
 
-        torrent_id = (add_data.get("data") or {}).get("torrent_id")
-        file_id = None
-        file_name = "video.mkv"
+    # 2. Evita multiplas requisicoes simultaneas para o mesmo filme
+    lock = _TB_LOCKS.setdefault(info_hash, _tb_asyncio.Lock())
+    async with lock:
+        agora = _tb_time.time()
+        cached = _TB_CACHE.get(info_hash)
+        if cached and cached["exp"] > agora:
+            return {"url": cached["url"], "file_name": cached["file_name"], "source": "torbox-cache"}
 
-        for _ in range(15):
-            list_res = await client.get(f"{tb_base}/torrents/mylist?bypass_cache=true", headers=headers)
-            items = list_res.json().get("data") or []
-            alvo = next(
-                (t for t in items if (torrent_id and t.get("id") == torrent_id) or (info_hash and info_hash in str(t.get("hash", "")).lower())),
-                None,
+        tb_base = "https://api.torbox.app/v1/api"
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        async with _tb_httpx.AsyncClient(timeout=20.0) as client:
+            add_res = await client.post(
+                f"{tb_base}/torrents/createtorrent",
+                headers=headers,
+                data={"magnet": req.magnet, "seed": "1", "allow_zip": "false"},
             )
-            if alvo and alvo.get("files"):
-                torrent_id = alvo["id"]
-                videos = [
-                    f for f in alvo["files"]
-                    if str(f.get("name", "")).lower().endswith((".mkv", ".mp4", ".avi", ".ts"))
-                ]
-                escolhido = max(videos or alvo["files"], key=lambda x: x.get("size", 0))
-                file_id = escolhido["id"]
-                file_name = escolhido.get("short_name") or escolhido.get("name", "video.mkv")
-                break
-            await _tb_asyncio.sleep(1.0)
+            add_data = add_res.json()
+            if not add_data.get("success") and "ALREADY" not in str(add_data.get("detail", "")).upper():
+                raise _TBHTTPException(status_code=400, detail=f"Erro TorBox: {add_data.get('detail')}")
 
-        if not torrent_id or file_id is None:
-            raise _TBHTTPException(status_code=404, detail="Torrent ainda baixando na nuvem TorBox.")
+            torrent_id = (add_data.get("data") or {}).get("torrent_id")
+            file_id = None
+            file_name = "video.mkv"
 
-        dl_res = await client.get(
-            f"{tb_base}/torrents/requestdl",
-            headers=headers,
-            params={"token": api_key, "torrent_id": torrent_id, "file_id": file_id},
-        )
-        dl_data = dl_res.json()
-        stream_url = dl_data.get("data")
-        if not dl_data.get("success") or not stream_url:
-            raise _TBHTTPException(status_code=502, detail="Falha ao gerar link HTTPS no TorBox")
+            for _ in range(15):
+                list_res = await client.get(f"{tb_base}/torrents/mylist?bypass_cache=true", headers=headers)
+                items = list_res.json().get("data") or []
+                alvo = next(
+                    (
+                        t for t in items
+                        if (torrent_id and t.get("id") == torrent_id)
+                        or (info_hash and info_hash in str(t.get("hash", "")).lower())
+                    ),
+                    None,
+                )
+                if alvo and alvo.get("files"):
+                    torrent_id = alvo["id"]
+                    videos = [
+                        f for f in alvo["files"]
+                        if str(f.get("name", "")).lower().endswith((".mkv", ".mp4", ".avi", ".ts"))
+                    ]
+                    escolhido = max(videos or alvo["files"], key=lambda x: x.get("size", 0))
+                    file_id = escolhido["id"]
+                    file_name = escolhido.get("short_name") or escolhido.get("name", "video.mkv")
+                    break
+                await _tb_asyncio.sleep(0.8)
 
-        if cdn_host:
-            stream_url = _tb_re.sub(r"^https?://[^/]+", f"https://{cdn_host}", stream_url)
+            if not torrent_id or file_id is None:
+                raise _TBHTTPException(status_code=404, detail="Torrent ainda baixando na nuvem TorBox.")
 
-        return {"url": stream_url, "file_name": file_name, "source": "torbox"}
+            dl_res = await client.get(
+                f"{tb_base}/torrents/requestdl",
+                headers=headers,
+                params={"token": api_key, "torrent_id": torrent_id, "file_id": file_id},
+            )
+            dl_data = dl_res.json()
+            stream_url = dl_data.get("data")
+            if not dl_data.get("success") or not stream_url:
+                raise _TBHTTPException(status_code=502, detail="Falha ao gerar link HTTPS no TorBox")
+
+            if cdn_host:
+                stream_url = _tb_re.sub(r"^https?://[^/]+", f"https://{cdn_host}", stream_url)
+
+            _TB_CACHE[info_hash] = {
+                "url": stream_url,
+                "file_name": file_name,
+                "exp": _tb_time.time() + _TB_TTL_SECONDS,
+            }
+            return {"url": stream_url, "file_name": file_name, "source": "torbox"}
 
 
 # ==========================================
