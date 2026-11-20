@@ -263,9 +263,14 @@ async def enriquecer_tmdb_e_imdb(client: httpx.AsyncClient, query: str, categori
 
             if tmdb_id and media_type:
                 try:
+                    direcao_str, elenco_str, classif_str = "", "", ""
                     r_det = await client.get(
                         f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
-                        params={"api_key": tmdb_key, "language": "pt-BR", "append_to_response": "external_ids"},
+                        params={
+                            "api_key": tmdb_key,
+                            "language": "pt-BR",
+                            "append_to_response": "external_ids,credits,release_dates,content_ratings",
+                        },
                         timeout=8.0,
                     )
                     if r_det.status_code == 200:
@@ -274,9 +279,46 @@ async def enriquecer_tmdb_e_imdb(client: httpx.AsyncClient, query: str, categori
                         ext_imdb = (det.get("external_ids") or {}).get("imdb_id")
                         if ext_imdb:
                             imdb_id = ext_imdb
+                        cred = det.get("credits") or {}
+                        if media_type == "movie":
+                            dirs = [c.get("name") for c in (cred.get("crew") or []) if c.get("job") == "Director" and c.get("name")]
+                        else:
+                            dirs = [c.get("name") for c in (det.get("created_by") or []) if c.get("name")]
+                            if not dirs:
+                                dirs = [c.get("name") for c in (cred.get("crew") or []) if c.get("job") in ("Director", "Executive Producer") and c.get("name")]
+                        direcao_str = ", ".join(dict.fromkeys(dirs[:2]))
+                        cast_list = [c.get("name") for c in (cred.get("cast") or [])[:5] if c.get("name")]
+                        elenco_str = ", ".join(cast_list)
+                        if media_type == "movie":
+                            for pais in ("BR", "US"):
+                                for item_rd in (det.get("release_dates") or {}).get("results") or []:
+                                    if item_rd.get("iso_3166_1") == pais:
+                                        certs = [x.get("certification", "").strip() for x in (item_rd.get("release_dates") or []) if x.get("certification", "").strip()]
+                                        if certs:
+                                            classif_str = certs[0]
+                                            break
+                                if classif_str:
+                                    break
+                        else:
+                            for pais in ("BR", "US"):
+                                for item_cr in (det.get("content_ratings") or {}).get("results") or []:
+                                    if item_cr.get("iso_3166_1") == pais and (item_cr.get("rating") or "").strip():
+                                        classif_str = item_cr["rating"].strip()
+                                        break
+                                if classif_str:
+                                    break
                 except Exception:
                     pass
 
+            sinopse_base = (top.get("overview") or "").strip()
+            partes_rodape = []
+            if classif_str:
+                partes_rodape.append(f"Classificação: {classif_str}")
+            if direcao_str:
+                partes_rodape.append(f"Direção: {direcao_str}")
+            if elenco_str:
+                partes_rodape.append(f"Elenco: {elenco_str}")
+            sinopse_final = f"{sinopse_base}\n\n{' • '.join(partes_rodape)}".strip() if partes_rodape else sinopse_base
             resultado.update({
                 "imdb_id": imdb_id,
                 "nota_imdb": round(float(vote), 1) if vote else None,
@@ -284,8 +326,11 @@ async def enriquecer_tmdb_e_imdb(client: httpx.AsyncClient, query: str, categori
                 "titulo": top.get("title") or top.get("name") or "",
                 "capa_url": poster,
                 "banner_url": banner,
-                "sinopse": top.get("overview") or "",
+                "sinopse": sinopse_final,
                 "genero": generos_str,
+                "direcao": direcao_str,
+                "elenco": elenco_str,
+                "classificacao": classif_str,
                 "ano": int(data_lanc[:4]) if len(data_lanc) >= 4 and data_lanc[:4].isdigit() else resultado["ano"],
                 "media_type": media_type,
                 "achou": bool(poster),
@@ -451,7 +496,7 @@ async def verificar_links(supabase_key: Optional[str] = None):
             if not url:
                 continue
             if url.lower().startswith("magnet:?"):
-                ativo = "btih:" in url.lower()
+                ativo = True
             elif url_morta(url):
                 ativo = False
             else:
@@ -846,3 +891,33 @@ async def baixar_legenda_vtt(url: str):
             texto = "WEBVTT\n\n" + texto
 
         return Response(content=texto, media_type="text/vtt; charset=utf-8")
+
+
+class _AquecerCdnLoteReq(_TBBaseModel):
+    magnets: list[str] = []
+
+
+@app.post("/aquecer-cdn-lote")
+async def aquecer_cdn_lote(req: _AquecerCdnLoteReq, background_tasks: BackgroundTasks):
+    vistos = set()
+    unicos = []
+    for m in req.magnets:
+        raw = (m or "").strip()
+        if not raw.lower().startswith("magnet:?"):
+            continue
+        m_hash = re.search(r"btih:([a-zA-Z0-9]+)", raw, re.I)
+        chave = m_hash.group(1).lower() if m_hash else raw.lower()
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(raw)
+
+    async def _aquecer_bg(lista_magnets: list[str]):
+        for mag in lista_magnets:
+            try:
+                await stream_torbox(_TorBoxRequest(magnet=mag))
+            except Exception:
+                pass
+
+    if unicos:
+        background_tasks.add_task(_aquecer_bg, unicos)
+    return {"ok": True, "enfileirados": len(unicos), "duplicados_ignorados": len(req.magnets) - len(unicos)}
