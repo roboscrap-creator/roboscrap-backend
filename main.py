@@ -47,12 +47,15 @@ def sb_headers(custom_key: Optional[str] = None) -> dict:
 
 
 def url_morta(url: str) -> bool:
-    u = url.lower().strip()
+    u = (url or "").strip()
     if not u:
         return True
-    if u.startswith("magnet:?"):
-        return "btih:" not in u
-    return any(d in u for d in DOMINIOS_MORTOS)
+    low = u.lower()
+    if low.startswith("magnet:?"):
+        return not bool(re.match(r"^magnet:\?xt=urn:btih:(?:[a-f0-9]{40}|[a-z2-7]{32})(?:&|$)", low))
+    if low.startswith(("http://", "https://")):
+        return any(d in low for d in DOMINIOS_MORTOS)
+    return True
 
 
 def extrair_info_magnet(magnet: str) -> dict:
@@ -400,8 +403,8 @@ async def buscar_metadados(req: BuscarMetadadosReq):
 @app.post("/analisar-torrent")
 async def analisar_torrent(req: AnalisarTorrentReq):
     magnet = req.magnet_url.strip()
-    if not magnet.lower().startswith("magnet:?"):
-        raise HTTPException(status_code=400, detail="Link inválido: deve começar com magnet:?")
+    if not magnet.lower().startswith("magnet:?xt=urn:btih:"):
+        raise HTTPException(status_code=400, detail="Link negado: obrigatório prefixo magnet:?xt=urn:btih:")
     info_mag = extrair_info_magnet(magnet)
     if not info_mag["valido"]:
         raise HTTPException(status_code=400, detail="Magnet link sem info_hash (btih) válido.")
@@ -460,7 +463,7 @@ async def processar_importacao_m3u(req: ImportarM3URequest):
                 "aprovado": req.aprovado_direto,
                 "link_ativo": True,
             }
-            if sb_key:
+            if sb_key and not url_morta(payload.get("url_stream", "")):
                 await client.post(f"{SUPABASE_URL}/rest/v1/catalogo_midia", headers=sb_headers(sb_key), json=payload, timeout=10.0)
 
 
@@ -495,10 +498,10 @@ async def verificar_links(supabase_key: Optional[str] = None):
             url = (item.get("url_stream") or "").strip()
             if not url:
                 continue
-            if url.lower().startswith("magnet:?"):
-                ativo = True
-            elif url_morta(url):
+            if url_morta(url):
                 ativo = False
+            elif url.lower().startswith("magnet:?xt=urn:btih:"):
+                ativo = True
             else:
                 try:
                     chk = await client.get(url, headers={"Range": "bytes=0-512", "User-Agent": "Mozilla/5.0"}, timeout=7.0)
@@ -678,7 +681,8 @@ async def _processar_lote_bg(req: LoteInteligenteReq):
                     "aprovado": aprovado_auto,
                     "link_ativo": True,
                 }
-                buffer_lote.append({k: v for k, v in item_raw.items() if k in colunas_validas})
+                if not url_morta(item_raw.get("url_stream", "")):
+                    buffer_lote.append({k: v for k, v in item_raw.items() if k in colunas_validas})
 
                 if len(buffer_lote) >= 20 or idx == total:
                     r_ins = await client.post(f"{sb_url}/rest/v1/catalogo_midia", headers={**headers_sb, "Prefer": "return=minimal"}, json=buffer_lote)
@@ -732,6 +736,8 @@ async def stream_torbox(req: _TorBoxRequest):
     cdn_host = _tb_os.getenv("GCORE_CDN_HOST", "").strip()
     if not api_key:
         raise _TBHTTPException(status_code=500, detail="TORBOX_API_KEY nao configurada")
+    if not (req.magnet or "").strip().lower().startswith("magnet:?xt=urn:btih:"):
+        raise _TBHTTPException(status_code=400, detail="Link negado: obrigatório prefixo magnet:?xt=urn:btih:")
 
     m = _tb_re.search(r"btih:([a-zA-Z0-9]{32,40})", req.magnet, _tb_re.IGNORECASE)
     info_hash = m.group(1).lower() if m else req.magnet.strip()
@@ -903,7 +909,7 @@ async def aquecer_cdn_lote(req: _AquecerCdnLoteReq, background_tasks: Background
     unicos = []
     for m in req.magnets:
         raw = (m or "").strip()
-        if not raw.lower().startswith("magnet:?"):
+        if not raw.lower().startswith("magnet:?xt=urn:btih:"):
             continue
         m_hash = re.search(r"btih:([a-zA-Z0-9]+)", raw, re.I)
         chave = m_hash.group(1).lower() if m_hash else raw.lower()
