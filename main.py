@@ -2,7 +2,18 @@ import os
 import re
 import urllib.parse
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+from urllib.parse import urlparse
+
+APP_SECRET = os.getenv("CINEMAX_APP_SECRET", "").strip()
+
+async def verificar_app_secret(x_app_secret: Optional[str] = Header(default=None)):
+    if not APP_SECRET:
+        return True  # Modo compatibilidade ate voce definir CINEMAX_APP_SECRET no Render
+    if x_app_secret != APP_SECRET:
+        raise HTTPException(status_code=401, detail="Acesso não autorizado ao CineMax Backend.")
+    return True
+
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
@@ -730,7 +741,7 @@ class _TorBoxRequest(_TBBaseModel):
     magnet: str
 
 
-@app.post("/stream-torbox")
+@app.post("/stream-torbox", dependencies=[Depends(verificar_app_secret)])
 async def stream_torbox(req: _TorBoxRequest):
     api_key = _tb_os.getenv("TORBOX_API_KEY", "").strip()
     cdn_host = _tb_os.getenv("GCORE_CDN_HOST", "").strip()
@@ -825,7 +836,7 @@ async def stream_torbox(req: _TorBoxRequest):
 # ==========================================
 import re
 
-@app.get("/legendas/buscar")
+@app.get("/legendas/buscar", dependencies=[Depends(verificar_app_secret)])
 async def buscar_legendas(
     titulo: str = "",
     tmdb_id: str = "",
@@ -881,6 +892,10 @@ async def buscar_legendas(
 @app.get("/legendas/baixar")
 async def baixar_legenda_vtt(url: str):
     from fastapi.responses import Response
+    host = (urlparse(url).hostname or "").lower()
+    dominios_permitidos = ("opensubtitles.org", "opensubtitles-v3.strem.io", "strem.io", "subs5.strem.io")
+    if not any(host == d or host.endswith("." + d) for d in dominios_permitidos):
+        raise HTTPException(status_code=400, detail="Domínio de legenda não permitido.")
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
@@ -903,7 +918,7 @@ class _AquecerCdnLoteReq(_TBBaseModel):
     magnets: list[str] = []
 
 
-@app.post("/aquecer-cdn-lote")
+@app.post("/aquecer-cdn-lote", dependencies=[Depends(verificar_app_secret)])
 async def aquecer_cdn_lote(req: _AquecerCdnLoteReq, background_tasks: BackgroundTasks):
     vistos = set()
     unicos = []
@@ -927,3 +942,42 @@ async def aquecer_cdn_lote(req: _AquecerCdnLoteReq, background_tasks: Background
     if unicos:
         background_tasks.add_task(_aquecer_bg, unicos)
     return {"ok": True, "enfileirados": len(unicos), "duplicados_ignorados": len(req.magnets) - len(unicos)}
+
+
+# ==========================================
+# PROXY TMDB PROTEGIDO (SEM EXPOR KEY NO APK)
+# ==========================================
+@app.get("/tmdb/details/{media_type}/{tmdb_id}", dependencies=[Depends(verificar_app_secret)])
+async def tmdb_details_proxy(media_type: str, tmdb_id: int):
+    if media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="media_type inválido")
+    tmdb_key = os.getenv("TMDB_API_KEY", "").strip()
+    if not tmdb_key:
+        raise HTTPException(status_code=500, detail="TMDB_API_KEY não configurada no servidor")
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        r = await client.get(
+            f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
+            params={
+                "api_key": tmdb_key,
+                "language": "pt-BR",
+                "append_to_response": "credits,external_ids",
+            },
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail="Falha ao consultar TMDB")
+        return r.json()
+
+
+@app.get("/tmdb/season/{tmdb_id}/{temporada}", dependencies=[Depends(verificar_app_secret)])
+async def tmdb_season_proxy(tmdb_id: int, temporada: int):
+    tmdb_key = os.getenv("TMDB_API_KEY", "").strip()
+    if not tmdb_key:
+        raise HTTPException(status_code=500, detail="TMDB_API_KEY não configurada no servidor")
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        r = await client.get(
+            f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{temporada}",
+            params={"api_key": tmdb_key, "language": "pt-BR"},
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail="Falha ao consultar temporada TMDB")
+        return r.json()
