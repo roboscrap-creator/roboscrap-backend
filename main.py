@@ -49,14 +49,15 @@ def detect_stream_format(url: str) -> str:
     return "STREAM"
 
 
-MAX_M3U_LINES = 15000
-MAX_BATCH_ITEMS = 50
+MAX_M3U_LINES = 4000
+MAX_BATCH_ITEMS = 25
 
-def stream_m3u_lines(url: str, max_lines: int = MAX_M3U_LINES):
-    """Lê uma lista M3U via HTTP em streaming sem carregar o arquivo inteiro de uma vez na RAM."""
+
+def stream_m3u_lines(url: str, max_lines: int = 4000):
+    """Lê M3U via HTTP em streaming e para assim que atinge max_lines para poupar RAM."""
     linhas = []
     try:
-        with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
@@ -69,57 +70,6 @@ def stream_m3u_lines(url: str, max_lines: int = MAX_M3U_LINES):
         pass
     return linhas
 
-
-def buscar_urls_existentes_supabase(supabase_url: str, supabase_key: str) -> set:
-    """Busca url_stream já existentes na tabela catalogo_midia para evitar duplicatas."""
-    existentes = set()
-    if not supabase_url or not supabase_key:
-        return existentes
-    try:
-        headers = {
-            "apikey": supabase_key,
-            "Authorization": f"Bearer {supabase_key}",
-            "Content-Type": "application/json",
-        }
-        offset_pg = 0
-        while True:
-            url = f"{supabase_url.rstrip('/')}/rest/v1/catalogo_midia?select=url_stream&limit=1000&offset={offset_pg}"
-            with httpx.Client(timeout=20.0) as client:
-                r = client.get(url, headers=headers)
-                if r.status_code != 200:
-                    break
-                dados = r.json()
-                if not isinstance(dados, list) or not dados:
-                    break
-                for row in dados:
-                    u = (row.get("url_stream") or "").strip()
-                    if u:
-                        existentes.add(u)
-                if len(dados) < 1000:
-                    break
-                offset_pg += 1000
-    except Exception:
-        pass
-    return existentes
-
-
-def filtrar_itens_novos(itens: list, supabase_url: str, supabase_key: str) -> tuple:
-    """Filtra itens cuja url_stream já exista no Supabase. Retorna (novos, ignorados)."""
-    existentes = buscar_urls_existentes_supabase(supabase_url, supabase_key)
-    if not existentes:
-        return itens, 0
-    novos = []
-    ignorados = 0
-    for item in itens:
-        if isinstance(item, dict):
-            u = (item.get("url_stream") or item.get("url") or "").strip()
-        else:
-            u = str(item).strip()
-        if u and u in existentes:
-            ignorados += 1
-        else:
-            novos.append(item)
-    return novos, ignorados
 
 app = FastAPI(title="RoboScrap 4.0 Pro Backend", version="4.0.0")
 
