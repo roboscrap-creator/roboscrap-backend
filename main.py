@@ -69,6 +69,39 @@ def stream_m3u_lines(url: str, max_lines: int = MAX_M3U_LINES):
         pass
     return linhas
 
+
+def buscar_urls_existentes_supabase(supabase_url: str, supabase_key: str) -> set:
+    """Busca url_stream já existentes na tabela catalogo_midia para evitar duplicatas."""
+    existentes = set()
+    if not supabase_url or not supabase_key:
+        return existentes
+    try:
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+        }
+        offset_pg = 0
+        while True:
+            url = f"{supabase_url.rstrip('/')}/rest/v1/catalogo_midia?select=url_stream&limit=1000&offset={offset_pg}"
+            with httpx.Client(timeout=20.0) as client:
+                r = client.get(url, headers=headers)
+                if r.status_code != 200:
+                    break
+                dados = r.json()
+                if not isinstance(dados, list) or not dados:
+                    break
+                for row in dados:
+                    u = (row.get("url_stream") or "").strip()
+                    if u:
+                        existentes.add(u)
+                if len(dados) < 1000:
+                    break
+                offset_pg += 1000
+    except Exception:
+        pass
+    return existentes
+
 app = FastAPI(title="RoboScrap 4.0 Pro Backend", version="4.0.0")
 
 app.add_middleware(
@@ -436,6 +469,7 @@ class ExtrairSiteReq(BaseModel):
 
 class LoteInteligenteReq(BaseModel):
     fonte_url: str
+    offset: int = 0
     limite: int = 100
     filtro: str = ""
     auto_aprovar: bool = True
