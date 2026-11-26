@@ -1,3 +1,4 @@
+import gc
 import os
 import re
 import urllib.parse
@@ -46,6 +47,27 @@ def detect_stream_format(url: str) -> str:
     if "output=m3u8" in u or "type=m3u" in u:
         return "M3U8"
     return "STREAM"
+
+
+MAX_M3U_LINES = 15000
+MAX_BATCH_ITEMS = 50
+
+def stream_m3u_lines(url: str, max_lines: int = MAX_M3U_LINES):
+    """Lê uma lista M3U via HTTP em streaming sem carregar o arquivo inteiro de uma vez na RAM."""
+    linhas = []
+    try:
+        with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+            with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    linhas.append(line.strip())
+                    if len(linhas) >= max_lines:
+                        break
+    except Exception:
+        pass
+    return linhas
 
 app = FastAPI(title="RoboScrap 4.0 Pro Backend", version="4.0.0")
 
@@ -503,6 +525,7 @@ async def parsear_lista_conteudo(payload: dict):
     if not conteudo:
         raise HTTPException(status_code=400, detail="Conteúdo vazio")
     itens = parse_m3u_or_text_content(conteudo)
+    gc.collect()
     return {"total": len(itens), "itens": itens}
 
 @app.get("/ping")
