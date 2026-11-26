@@ -102,6 +102,25 @@ def buscar_urls_existentes_supabase(supabase_url: str, supabase_key: str) -> set
         pass
     return existentes
 
+
+def filtrar_itens_novos(itens: list, supabase_url: str, supabase_key: str) -> tuple:
+    """Filtra itens cuja url_stream já exista no Supabase. Retorna (novos, ignorados)."""
+    existentes = buscar_urls_existentes_supabase(supabase_url, supabase_key)
+    if not existentes:
+        return itens, 0
+    novos = []
+    ignorados = 0
+    for item in itens:
+        if isinstance(item, dict):
+            u = (item.get("url_stream") or item.get("url") or "").strip()
+        else:
+            u = str(item).strip()
+        if u and u in existentes:
+            ignorados += 1
+        else:
+            novos.append(item)
+    return novos, ignorados
+
 app = FastAPI(title="RoboScrap 4.0 Pro Backend", version="4.0.0")
 
 app.add_middleware(
