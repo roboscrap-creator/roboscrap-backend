@@ -18,6 +18,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 
+
+STREAM_EXT_REGEX = re.compile(r'(\.(?:m3u8|ts|mpd|m3u|mp4|mkv|avi)(?:\?[^\s"\'<>]*)?)$', re.IGNORECASE)
+DIRECT_STREAM_REGEX = re.compile(r'https?://[^\s"\'<>]+?\.(?:m3u8|ts|mpd|m3u|mp4|mkv|avi)(?:\?[^\s"\'<>]*)?', re.IGNORECASE)
+
+def is_valid_media_link(url: str) -> bool:
+    if not url:
+        return False
+    u = url.strip().lower()
+    if u.startswith("magnet:?"):
+        return True
+    if DIRECT_STREAM_REGEX.search(u):
+        return True
+    if any(k in u for k in ("/live/", "/stream/", "/hls/", "/dash/", "type=m3u", "output=ts", "output=m3u8")):
+        return True
+    return False
+
+def detect_stream_format(url: str) -> str:
+    u = (url or "").strip().lower()
+    if u.startswith("magnet:?"):
+        return "MAGNET"
+    for ext in ("m3u8", "ts", "mpd", "m3u", "mp4", "mkv", "avi"):
+        if re.search(rf'\.{ext}(?:\?|$|#|&)', u):
+            return ext.upper()
+    if "output=ts" in u:
+        return "TS"
+    if "output=m3u8" in u or "type=m3u" in u:
+        return "M3U8"
+    return "STREAM"
+
 app = FastAPI(title="RoboScrap 4.0 Pro Backend", version="4.0.0")
 
 app.add_middleware(
@@ -394,6 +423,88 @@ class LoteInteligenteReq(BaseModel):
 
 
 @app.get("/")
+
+def parse_m3u_or_text_content(conteudo: str) -> list:
+    linhas = [l.strip() for l in conteudo.splitlines() if l.strip()]
+    itens = []
+    meta_atual = {}
+    for linha in linhas:
+        if linha.startswith("#EXTM3U"):
+            continue
+        if linha.startswith("#EXTINF:"):
+            # Extrai atributos tvg-logo, group-title e título após a última vírgula
+            logo_m = re.search(r'tvg-logo="([^"]*)"', linha, re.IGNORECASE)
+            group_m = re.search(r'group-title="([^"]*)"', linha, re.IGNORECASE)
+            titulo = linha.split(",")[-1].strip() if "," in linha else "Canal / Mídia"
+            meta_atual = {
+                "titulo": titulo,
+                "capa": logo_m.group(1).strip() if logo_m else "",
+                "grupo": group_m.group(1).strip() if group_m else "",
+            }
+            continue
+        if linha.startswith("#"):
+            continue
+
+        # Pode ser uma linha pura com URL ou "Nome | URL"
+        url_candidata = linha
+        titulo_inline = ""
+        if "|" in linha and "http" in linha:
+            partes = linha.split("|", 1)
+            if partes[1].strip().startswith(("http://", "https://", "magnet:?")):
+                titulo_inline = partes[0].strip()
+                url_candidata = partes[1].strip()
+
+        if not is_valid_media_link(url_candidata):
+            # Procura links embutidos dentro de texto solto
+            encontrados = DIRECT_STREAM_REGEX.findall(linha) + re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s"\'<>]*', linha)
+            for u in encontrados:
+                fmt = detect_stream_format(u)
+                itens.append({
+                    "titulo": meta_atual.get("titulo") or titulo_inline or limpar_nome_torrent(u.split("/")[-1]),
+                    "url": u,
+                    "formato": fmt,
+                    "tipo": "tv" if fmt in ("TS", "M3U8", "MPD") else "filme",
+                    "grupo": meta_atual.get("grupo", ""),
+                    "capa": meta_atual.get("capa", ""),
+                })
+            meta_atual = {}
+            continue
+
+        fmt = detect_stream_format(url_candidata)
+        titulo_final = meta_atual.get("titulo") or titulo_inline
+        if not titulo_final:
+            raw_name = unquote(url_candidata.split("?")[0].rstrip("/").split("/")[-1])
+            titulo_final = limpar_nome_torrent(re.sub(r'\.(m3u8|ts|mpd|m3u|mp4|mkv|avi)$', '', raw_name, flags=re.IGNORECASE)) or f"Stream {fmt}"
+
+        grupo_low = (meta_atual.get("grupo") or "").lower()
+        tit_low = titulo_final.lower()
+        if any(k in grupo_low for k in ("serie", "série", "series", "séries", "novela", "anime")) or re.search(r's\d{1,2}e\d{1,2}|\d{1,2}x\d{1,2}', tit_low):
+            tipo = "serie"
+        elif any(k in grupo_low for k in ("filme", "filmes", "movie", "movies", "vod", "cinema")) or fmt in ("MAGNET", "MP4", "MKV", "AVI"):
+            tipo = "filme"
+        else:
+            # Extensões .ts, .m3u8 e .mpd sem marcação de VOD/Série são tratados como Canais de TV ao vivo
+            tipo = "tv" if fmt in ("TS", "M3U8", "MPD", "M3U") else "filme"
+
+        itens.append({
+            "titulo": titulo_final,
+            "url": url_candidata,
+            "formato": fmt,
+            "tipo": tipo,
+            "grupo": meta_atual.get("grupo", ""),
+            "capa": meta_atual.get("capa", ""),
+        })
+        meta_atual = {}
+    return itens
+
+@app.post("/parsear-lista-conteudo")
+async def parsear_lista_conteudo(payload: dict):
+    conteudo = (payload.get("conteudo") or "").strip()
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="Conteúdo vazio")
+    itens = parse_m3u_or_text_content(conteudo)
+    return {"total": len(itens), "itens": itens}
+
 @app.get("/ping")
 async def healthcheck():
     return {
