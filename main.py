@@ -508,8 +508,11 @@ def parse_m3u_or_text_content(conteudo: str) -> list:
         elif any(k in grupo_low for k in ("filme", "filmes", "movie", "movies", "vod", "cinema")) or fmt in ("MAGNET", "MP4", "MKV", "AVI"):
             tipo = "filme"
         else:
-            # Extensões .ts, .m3u8 e .mpd sem marcação de VOD/Série são tratados como Canais de TV ao vivo
-            tipo = "tv" if fmt in ("TS", "M3U8", "MPD", "M3U") else "filme"
+            # Verifica se o titulo possui ano (19xx/20xx) ou padrao de VOD/Serie antes de classificar .ts como TV
+            if re.search(r'\b(19\d{2}|20\d{2})\b', tit_low) or any(k in tit_low for k in ("dublado", "legendado", "dual", "1080p", "720p", "4k", "bluray", "web-dl")):
+                tipo = "filme"
+            else:
+                tipo = "tv" if fmt in ("TS", "M3U8", "MPD", "M3U") else "filme"
 
         itens.append({
             "titulo": titulo_final,
